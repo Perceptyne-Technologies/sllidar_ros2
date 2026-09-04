@@ -78,6 +78,8 @@ class SLlidarNode : public rclcpp::Node
         this->declare_parameter<bool>("angle_compensate", false);
         this->declare_parameter<std::string>("scan_mode",std::string());
         this->declare_parameter<float>("scan_frequency",10);
+        this->declare_parameter<float>("scan_disable_angle_min_rad", NAN);
+        this->declare_parameter<float>("scan_disable_angle_max_rad", NAN);
         
         this->get_parameter_or<std::string>("channel_type", channel_type, "serial");
         this->get_parameter_or<std::string>("tcp_ip", tcp_ip, "192.168.0.7"); 
@@ -90,10 +92,14 @@ class SLlidarNode : public rclcpp::Node
         this->get_parameter_or<bool>("inverted", inverted, false);
         this->get_parameter_or<bool>("angle_compensate", angle_compensate, false);
         this->get_parameter_or<std::string>("scan_mode", scan_mode, std::string());
+        this->get_parameter_or<float>("scan_disable_angle_min_rad", scan_angle_min_rad, NAN);
+        this->get_parameter_or<float>("scan_disable_angle_max_rad", scan_angle_max_rad, NAN);
+
         if(channel_type == "udp")
             this->get_parameter_or<float>("scan_frequency", scan_frequency, 20.0);
         else
             this->get_parameter_or<float>("scan_frequency", scan_frequency, 10.0);
+        blacklist_scan_angle_range = !std::isnan(scan_angle_max_rad) && !std::isnan(scan_angle_min_rad);
     }
 
     bool getSLLIDARDeviceInfo(ILidarDriver * drv)
@@ -230,24 +236,41 @@ class SLlidarNode : public rclcpp::Node
 
         scan_msg->intensities.resize(node_count);
         scan_msg->ranges.resize(node_count);
+
+        size_t scan_min_count, scan_max_count;
+        if (blacklist_scan_angle_range) {
+            scan_min_count = std::max(0.0f, (scan_angle_min_rad - scan_msg->angle_min) * 1/scan_msg->angle_increment);
+            scan_max_count = std::min((float) (node_count - 1), (scan_angle_max_rad - scan_msg->angle_min) * 1/scan_msg->angle_increment);
+        }
+
         bool reverse_data = (!inverted && reversed) || (inverted && !reversed);
         if (!reverse_data) {
             for (size_t i = 0; i < node_count; i++) {
-                float read_value = (float) nodes[i].dist_mm_q2/4.0f/1000;
-                if (read_value == 0.0)
+                if (blacklist_scan_angle_range && ((i > scan_min_count) && (i < scan_max_count))) {
                     scan_msg->ranges[i] = std::numeric_limits<float>::infinity();
-                else
-                    scan_msg->ranges[i] = read_value;
-                scan_msg->intensities[i] = (float) (nodes[i].quality >> 2);
+                    scan_msg->intensities[i] = 0.0;
+                } else {
+                    float read_value = (float) nodes[i].dist_mm_q2/4.0f/1000;
+                    if (read_value == 0.0)
+                        scan_msg->ranges[i] = std::numeric_limits<float>::infinity();
+                    else
+                        scan_msg->ranges[i] = read_value;
+                    scan_msg->intensities[i] = (float) (nodes[i].quality >> 2);
+                }
             }
         } else {
             for (size_t i = 0; i < node_count; i++) {
-                float read_value = (float)nodes[i].dist_mm_q2/4.0f/1000;
-                if (read_value == 0.0)
-                    scan_msg->ranges[node_count-1-i] = std::numeric_limits<float>::infinity();
-                else
-                    scan_msg->ranges[node_count-1-i] = read_value;
-                scan_msg->intensities[node_count-1-i] = (float) (nodes[i].quality >> 2);
+                if (blacklist_scan_angle_range && ((i > scan_min_count) && (i < scan_max_count))) {
+                    scan_msg->ranges[node_count - 1 - i] = std::numeric_limits<float>::infinity();
+                    scan_msg->intensities[node_count - 1 - i] = 0.0;
+                } else { 
+                    float read_value = (float)nodes[i].dist_mm_q2/4.0f/1000;
+                    if (read_value == 0.0)
+                        scan_msg->ranges[node_count-1-i] = std::numeric_limits<float>::infinity();
+                    else
+                        scan_msg->ranges[node_count-1-i] = read_value;
+                    scan_msg->intensities[node_count-1-i] = (float) (nodes[i].quality >> 2);
+                }
             }
         }
 
@@ -457,6 +480,8 @@ public:
     bool inverted = false;
     bool angle_compensate = true;
     float max_distance = 8.0;
+    float scan_angle_min_rad, scan_angle_max_rad;
+    bool blacklist_scan_angle_range;
     size_t angle_compensate_multiple = 1;//it stand of angle compensate at per 1 degree
     std::string scan_mode;
     float scan_frequency;
